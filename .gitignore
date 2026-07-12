@@ -1,7 +1,25 @@
+# Environment variables
+.env
+
+# Python virtual environment
 venv/
+.venv/
+
+# Python cache
 __pycache__/
-*.pyc
-.DS_Store
+*.py[cod]
+
+# Testing and coverage
+.pytest_cache/
 .coverage
-.pytest_cache
-htmlcov
+htmlcov/
+
+# IDE files
+.vscode/
+.idea/
+
+# Operating system files
+.DS_Store
+
+# PostgreSQL and application data
+postgres_data/
