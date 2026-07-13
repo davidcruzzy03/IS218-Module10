@@ -1,16 +1,30 @@
 import os
+import subprocess
+import time
+import urllib.error
+import urllib.request
 
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-# Set this before importing the application database modules.
+
+# ---------------------------------------------------------
+# Test database configuration
+# ---------------------------------------------------------
+
 TEST_DATABASE_URL = os.getenv(
     "TEST_DATABASE_URL",
     "postgresql://postgres:postgres@localhost:5432/fastapi_test_db",
 )
 
+# main.py reads DATABASE_URL, so make sure it uses the test
+# database before importing the application.
+os.environ["DATABASE_URL"] = TEST_DATABASE_URL
+
+
+# These imports must occur after setting DATABASE_URL.
 from app.database import Base, get_db  # noqa: E402
 from app.models.user import User  # noqa: E402, F401
 from main import app  # noqa: E402
@@ -28,12 +42,16 @@ TestingSessionLocal = sessionmaker(
 )
 
 
+# ---------------------------------------------------------
+# PostgreSQL fixtures
+# ---------------------------------------------------------
+
 @pytest.fixture(scope="session", autouse=True)
 def prepare_test_database():
     """
-    Create the database tables once for the test session.
+    Create all database tables before the test session.
 
-    All tables are removed when the test session finishes.
+    Remove the tables after all tests finish.
     """
 
     Base.metadata.drop_all(bind=test_engine)
@@ -47,13 +65,17 @@ def prepare_test_database():
 @pytest.fixture
 def database():
     """
-    Give each test a database session and roll back its work afterward.
+    Give each test a database session.
+
+    All database changes are rolled back after the test.
     """
 
     connection = test_engine.connect()
     transaction = connection.begin()
 
-    session = TestingSessionLocal(bind=connection)
+    session = TestingSessionLocal(
+        bind=connection,
+    )
 
     try:
         yield session
@@ -65,13 +87,12 @@ def database():
 
 @pytest.fixture
 def client(database):
-    """Create a FastAPI client that uses the testing database session."""
+    """
+    Create a FastAPI TestClient using the test database.
+    """
 
     def override_get_db():
-        try:
-            yield database
-        finally:
-            pass
+        yield database
 
     app.dependency_overrides[get_db] = override_get_db
 
@@ -79,3 +100,79 @@ def client(database):
         yield test_client
 
     app.dependency_overrides.clear()
+
+
+# ---------------------------------------------------------
+# E2E FastAPI server fixture
+# ---------------------------------------------------------
+
+@pytest.fixture(scope="session")
+def fastapi_server():
+    """
+    Start a real FastAPI server for Playwright E2E tests.
+
+    The fixture waits until the health endpoint responds before
+    allowing the browser tests to continue.
+    """
+
+    server_url = "http://127.0.0.1:8001"
+
+    environment = os.environ.copy()
+    environment["DATABASE_URL"] = TEST_DATABASE_URL
+
+    process = subprocess.Popen(
+        [
+            "uvicorn",
+            "main:app",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "8001",
+        ],
+        env=environment,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+
+    server_ready = False
+
+    for _ in range(30):
+        try:
+            with urllib.request.urlopen(
+                f"{server_url}/health",
+                timeout=1,
+            ) as response:
+                if response.status == 200:
+                    server_ready = True
+                    break
+        except (
+            urllib.error.URLError,
+            ConnectionError,
+            TimeoutError,
+        ):
+            time.sleep(1)
+
+    if not server_ready:
+        process.terminate()
+
+        try:
+            output, _ = process.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            output, _ = process.communicate()
+
+        pytest.fail(
+            "FastAPI server did not start for E2E tests.\n"
+            f"Server output:\n{output}"
+        )
+
+    yield server_url
+
+    process.terminate()
+
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()

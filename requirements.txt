@@ -17,5 +17,6 @@ requests==2.32.3
 
 pytest==8.3.3
 pytest-cov==6.0.0
+pytest-playwright
 
 playwright==1.48.0

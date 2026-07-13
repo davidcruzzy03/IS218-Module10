@@ -152,3 +152,19 @@ def test_divide_by_zero_api(client):
     # Assert that the 'error' field contains the correct error message
     assert "Cannot divide by zero!" in response.json()['error'], \
         f"Expected error message 'Cannot divide by zero!', got '{response.json()['error']}'"
+
+def test_root_page_loads(client):
+    """The calculator home page should load successfully."""
+
+    response = client.get("/")
+
+    assert response.status_code == 200
+    assert "text/html" in response.headers["content-type"]
+
+def test_health_endpoint_returns_healthy(client):
+    """The Docker health endpoint should report a healthy application."""
+
+    response = client.get("/health")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "healthy"}
