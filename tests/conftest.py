@@ -1,74 +1,81 @@
-# tests/e2e/conftest.py
+import os
 
-import subprocess
-import time
 import pytest
-from playwright.sync_api import sync_playwright
-import requests
+from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
 
-@pytest.fixture(scope='session')
-def fastapi_server():
+# Set this before importing the application database modules.
+TEST_DATABASE_URL = os.getenv(
+    "TEST_DATABASE_URL",
+    "postgresql://postgres:postgres@localhost:5432/fastapi_test_db",
+)
+
+from app.database import Base, get_db  # noqa: E402
+from app.models.user import User  # noqa: E402, F401
+from main import app  # noqa: E402
+
+
+test_engine = create_engine(
+    TEST_DATABASE_URL,
+    pool_pre_ping=True,
+)
+
+TestingSessionLocal = sessionmaker(
+    autocommit=False,
+    autoflush=False,
+    bind=test_engine,
+)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def prepare_test_database():
     """
-    Fixture to start the FastAPI server before E2E tests and stop it after tests complete.
+    Create the database tables once for the test session.
+
+    All tables are removed when the test session finishes.
     """
-    # Start FastAPI app
-    fastapi_process = subprocess.Popen(['python', 'main.py'])
-    
-    # Define the URL to check if the server is up
-    server_url = 'http://127.0.0.1:8000/'
-    
-    # Wait for the server to start by polling the root endpoint
-    timeout = 30  # seconds
-    start_time = time.time()
-    server_up = False
-    
-    print("Starting FastAPI server...")
-    
-    while time.time() - start_time < timeout:
-        try:
-            response = requests.get(server_url)
-            if response.status_code == 200:
-                server_up = True
-                print("FastAPI server is up and running.")
-                break
-        except requests.exceptions.ConnectionError:
-            pass
-        time.sleep(1)
-    
-    if not server_up:
-        fastapi_process.terminate()
-        raise RuntimeError("FastAPI server failed to start within timeout period.")
-    
+
+    Base.metadata.drop_all(bind=test_engine)
+    Base.metadata.create_all(bind=test_engine)
+
     yield
-    
-    # Terminate FastAPI server
-    print("Shutting down FastAPI server...")
-    fastapi_process.terminate()
-    fastapi_process.wait()
-    print("FastAPI server has been terminated.")
 
-@pytest.fixture(scope="session")
-def playwright_instance_fixture():
-    """
-    Fixture to manage Playwright's lifecycle.
-    """
-    with sync_playwright() as p:
-        yield p
+    Base.metadata.drop_all(bind=test_engine)
 
-@pytest.fixture(scope="session")
-def browser(playwright_instance_fixture):
-    """
-    Fixture to launch a browser instance.
-    """
-    browser = playwright_instance_fixture.chromium.launch(headless=True)
-    yield browser
-    browser.close()
 
-@pytest.fixture(scope="function")
-def page(browser):
+@pytest.fixture
+def database():
     """
-    Fixture to create a new page for each test.
+    Give each test a database session and roll back its work afterward.
     """
-    page = browser.new_page()
-    yield page
-    page.close()
+
+    connection = test_engine.connect()
+    transaction = connection.begin()
+
+    session = TestingSessionLocal(bind=connection)
+
+    try:
+        yield session
+    finally:
+        session.close()
+        transaction.rollback()
+        connection.close()
+
+
+@pytest.fixture
+def client(database):
+    """Create a FastAPI client that uses the testing database session."""
+
+    def override_get_db():
+        try:
+            yield database
+        finally:
+            pass
+
+    app.dependency_overrides[get_db] = override_get_db
+
+    with TestClient(app) as test_client:
+        yield test_client
+
+    app.dependency_overrides.clear()
